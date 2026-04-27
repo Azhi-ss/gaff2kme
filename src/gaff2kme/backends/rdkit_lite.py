@@ -65,6 +65,8 @@ BOND_TYPE_FALLBACK: dict[str, list[str]] = {
     "cs": ["c", "c2"],    # C=S carbon → c(sp2) first, c2(sp2) 2nd (RadonPy: cs→c)
     # Phosphorus types without angle entries
     "pb": ["pc"],         # aromatic P → pc (RadonPy: pb→pc)
+    # sp carbon types → c1 (non-conjugated sp carbon, has comprehensive bond entries)
+    "cg": ["c1"],         # conjugated sp carbon → c1 (RadonPy: cg→c1)
 }
 
 
@@ -652,8 +654,13 @@ class RdkitLiteBackend:
     def _assign_btypes(self, mol) -> bool:
         result_flag = True
         for b in mol.GetBonds():
-            ba = b.GetBeginAtom().GetProp("ff_type")
-            bb = b.GetEndAtom().GetProp("ff_type")
+            a1 = b.GetBeginAtom()
+            a2 = b.GetEndAtom()
+            if not a1.HasProp("ff_type") or not a2.HasProp("ff_type"):
+                result_flag = False
+                continue
+            ba = a1.GetProp("ff_type")
+            bb = a2.GetProp("ff_type")
             bt = f"{ba},{bb}"
             if self._set_btype(b, bt):
                 continue
@@ -690,6 +697,19 @@ class RdkitLiteBackend:
                         if self._set_btype(b, c):
                             found = True
                             break
+            # Cross-product: alt_ptype on one atom × BOND_TYPE_FALLBACK on the other
+            if not found:
+                cross_candidates = []
+                if alt1 and fb_list2:
+                    for fb2 in fb_list2:
+                        cross_candidates.append(f"{alt1},{fb2}")
+                if alt2 and fb_list1:
+                    for fb1 in fb_list1:
+                        cross_candidates.append(f"{fb1},{alt2}")
+                for c in cross_candidates:
+                    if self._set_btype(b, c):
+                        found = True
+                        break
             if not found:
                 result_flag = False
         return result_flag
@@ -725,6 +745,9 @@ class RdkitLiteBackend:
                     key1 = f"{a},{b},{c}"
                     key2 = f"{c},{b},{a}"
                     if key1 in mol.angles or key2 in mol.angles:
+                        continue
+                    if not p1.HasProp("ff_type") or not p.HasProp("ff_type") or not p2.HasProp("ff_type"):
+                        result_flag = False
                         continue
                     pt1 = p1.GetProp("ff_type")
                     pt = p.GetProp("ff_type")
@@ -773,14 +796,14 @@ class RdkitLiteBackend:
         return True
 
     def _empirical_angle(self, mol, a: int, b: int, c: int,
-                         pt1: str, pt: str, pt2: str) -> None:
+                         pt1: str, pt: str, pt2: str) -> bool:
         param_C = {"H": 0.0, "C": 1.339, "N": 1.3, "O": 1.249, "F": 0.0,
                    "Cl": 0.0, "Br": 0.0, "I": 0.0, "P": 0.906, "S": 1.448, "Si": 0.894}
         param_Z = {"H": 0.784, "C": 1.183, "N": 1.212, "O": 1.219, "F": 1.166,
                    "Cl": 1.272, "Br": 1.378, "I": 1.398, "P": 1.620, "S": 1.280, "Si": 1.016}
-        elem1 = pt1.rstrip("0123456789").lstrip("h")
-        elem = pt.rstrip("0123456789").lstrip("h")
-        elem2 = pt2.rstrip("0123456789").lstrip("h")
+        elem1 = pt1.rstrip("0123456789").lstrip("h")[0].upper()
+        elem = pt.rstrip("0123456789").lstrip("h")[0].upper()
+        elem2 = pt2.rstrip("0123456789").lstrip("h")[0].upper()
         c1 = param_C.get(elem1, 0.0)
         c2 = param_C.get(elem, 0.0)
         c3 = param_C.get(elem2, 0.0)
@@ -788,14 +811,15 @@ class RdkitLiteBackend:
         z2 = param_Z.get(elem, 1.0)
         z3 = param_Z.get(elem2, 1.0)
         if c1 + c2 + c3 == 0:
-            return
+            return False
         theta0 = c1 + c2 + c3
         k_ang = 0.5 * (z1 * z3) / (z2 * z2) * 100.0
         if k_ang < 20:
-            return
+            return False
         ff = _AngleFF(type=f"{pt1},{pt},{pt2}", k=k_ang, theta0=theta0)
         key = f"{a},{b},{c}"
         mol.angles[key] = _AngleObj(a=a, b=b, c=c, ff=ff)
+        return True
 
     def _assign_dtypes(self, mol) -> bool:
         result_flag = True
@@ -816,6 +840,10 @@ class RdkitLiteBackend:
                     key1 = f"{a},{b},{c},{d}"
                     key2 = f"{d},{c},{b},{a}"
                     if key1 in mol.dihedrals or key2 in mol.dihedrals:
+                        continue
+                    if (not p1b.HasProp("ff_type") or not p1.HasProp("ff_type")
+                            or not p2.HasProp("ff_type") or not p2b.HasProp("ff_type")):
+                        result_flag = False
                         continue
                     p1bt = p1b.GetProp("ff_type")
                     p1t = p1.GetProp("ff_type")
