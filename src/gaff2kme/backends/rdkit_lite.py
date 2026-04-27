@@ -67,6 +67,10 @@ BOND_TYPE_FALLBACK: dict[str, list[str]] = {
     "pb": ["pc"],         # aromatic P → pc (RadonPy: pb→pc)
     # sp carbon types → c1 (non-conjugated sp carbon, has comprehensive bond entries)
     "cg": ["c1"],         # conjugated sp carbon → c1 (RadonPy: cg→c1)
+    # Hydrogen types without bond entries for Si-adjacent carbons
+    "ha": ["hc"],         # sp2 C-H → sp3 C-H (for ci,ha → ci,hc fallback)
+    "h1": ["hc"],         # sp3 C-H (1 electroneg) → hc (for ci,h1 fallback)
+    "hi": ["hc"],         # Si-H → sp3 C-H (ci,hc is the only ci-H bond entry)
 }
 
 
@@ -530,6 +534,7 @@ class RdkitLiteBackend:
             p_idx = p.GetIdx()
             carbonyl = False
             conj = 0
+            silicon_flag = any(nb.GetSymbol() == "Si" for nb in p.GetNeighbors())
             for pb in p.GetNeighbors():
                 if pb.GetSymbol() == "O":
                     for b in pb.GetBonds():
@@ -538,7 +543,9 @@ class RdkitLiteBackend:
             for b in p.GetBonds():
                 if b.GetIsConjugated():
                     conj += 1
-            if carbonyl:
+            if silicon_flag:
+                self._set_ptype(p, "ci" if "ci" in self.param.pt else "c3")
+            elif carbonyl:
                 self._set_ptype(p, "c")
             elif p.GetIsAromatic():
                 self._set_ptype(p, "ca")
@@ -795,15 +802,24 @@ class RdkitLiteBackend:
         mol.angles[key] = _AngleObj(a=a, b=b, c=c, ff=ff)
         return True
 
+    # Maps ff_type prefix to element symbol for _empirical_angle
+    _ETYPE_MAP: dict[str, str] = {
+        "h": "H", "c": "C", "n": "N", "o": "O", "f": "F",
+        "p": "P", "s": "S", "i": "I", "b": "B",
+    }
+
+    def _etype_from_fftype(self, pt: str) -> str:
+        return self._ETYPE_MAP.get(pt[0], "")
+
     def _empirical_angle(self, mol, a: int, b: int, c: int,
                          pt1: str, pt: str, pt2: str) -> bool:
         param_C = {"H": 0.0, "C": 1.339, "N": 1.3, "O": 1.249, "F": 0.0,
                    "Cl": 0.0, "Br": 0.0, "I": 0.0, "P": 0.906, "S": 1.448, "Si": 0.894}
         param_Z = {"H": 0.784, "C": 1.183, "N": 1.212, "O": 1.219, "F": 1.166,
                    "Cl": 1.272, "Br": 1.378, "I": 1.398, "P": 1.620, "S": 1.280, "Si": 1.016}
-        elem1 = pt1.rstrip("0123456789").lstrip("h")[0].upper()
-        elem = pt.rstrip("0123456789").lstrip("h")[0].upper()
-        elem2 = pt2.rstrip("0123456789").lstrip("h")[0].upper()
+        elem1 = self._etype_from_fftype(pt1)
+        elem = self._etype_from_fftype(pt)
+        elem2 = self._etype_from_fftype(pt2)
         c1 = param_C.get(elem1, 0.0)
         c2 = param_C.get(elem, 0.0)
         c3 = param_C.get(elem2, 0.0)
