@@ -39,6 +39,34 @@ ALT_PTYPE_GAFF2_MOD: dict[str, str] = {
     "c3f": "c3", "ci": "c3", "ng": "n3",
 }
 
+# Fallback for atom types that exist in particle_types but have no
+# bond_type / angle_type / dihedral_type entries.
+# Each entry maps to a list of fallback types tried in order.
+# The order matters: more chemically similar first, then broader fallbacks.
+BOND_TYPE_FALLBACK: dict[str, list[str]] = {
+    # Nitrogen types without bond entries
+    "n7": ["n", "n3"],   # n (sp2 N) first for aromatic/SP2 contexts, then n3 (sp3)
+    "n8": ["n", "n3"],
+    "n9": ["n", "n3"],
+    "n3": ["n"],          # n3 has no entries for SP2 carbons (c, ca, cc); fall back to n
+    "ng": ["n", "n3"],    # guanidinium N
+    "ns": ["n", "na"],    # sulfonamide N
+    "nt": ["n", "n3"],    # amide N
+    "nu": ["n", "n3"],
+    "nv": ["n", "n3"],
+    "nx": ["n", "n3"],
+    "ny": ["n", "n3"],
+    "nz": ["n", "n3"],
+    # Carbon types without bond entries
+    "c3f": ["c3"],        # CF carbon → sp3 carbon
+    "cg": ["c", "cc"],    # inner conjugated SP carbon
+    "cs": ["c", "c3"],    # another carbon variant
+    # Halogen / H types without bond entries
+    "hn": ["h1", "hc"],   # H on N → generic H
+    "hi": ["h1", "hc"],   # H on I → generic H
+    "br": ["cl"],         # Br → Cl (halogen fallback)
+}
+
 
 class _WildcardInfo(NamedTuple):
     """Connection point info from a pSMILES wildcard atom."""
@@ -256,7 +284,16 @@ class RdkitLiteBackend:
         tail_ne = _remapped(tail.neighbor_idx)
 
         if head_ne == tail_ne:
-            return None  # degenerate single-atom core
+            # Degenerate case: both wildcards share the same neighbor atom.
+            # E.g., [*]C([*])R — a branched monomer.
+            # Strategy: keep the core as-is, connect core i's head neighbor
+            # to core (i+1)'s tail neighbor via a bond through their shared
+            # branching atom. Since head_ne == tail_ne, the branching atom
+            # has two free valences after wildcard removal.
+            # We simply add a direct bond between the branching atoms of
+            # adjacent cores.
+            return self._make_cyclic_polymer_degenerate(core, head_ne, tail_ne, n,
+                                                         head, tail)
 
         # Bond type resolution: max of head/tail connection bond orders
         head_bt, tail_bt = head.bond_type_as_double, tail.bond_type_as_double
@@ -287,6 +324,54 @@ class RdkitLiteBackend:
             mol_out = Chem.AddHs(mol_out)
         except Exception:
             return None
+
+        return mol_out
+
+    def _make_cyclic_polymer_degenerate(self, core, head_ne: int, tail_ne: int,
+                                         n: int, head, tail):
+        """Handle degenerate pSMILES where both wildcards share the same neighbor.
+
+        In [*]C([*])R, both * connect to the same C. After removing wildcards,
+        the C atom has 2 free valences. We create an n-mer by adding bonds
+        between the branching atoms (C) of adjacent repeat units.
+        """
+        # Bond type: use max of head/tail bond orders
+        head_bt, tail_bt = head.bond_type_as_double, tail.bond_type_as_double
+        if head_bt == 2.0 or tail_bt == 2.0:
+            new_bond_type = Chem.rdchem.BondType.DOUBLE
+        elif head_bt == 3.0 or tail_bt == 3.0:
+            new_bond_type = Chem.rdchem.BondType.TRIPLE
+        else:
+            new_bond_type = Chem.rdchem.BondType.SINGLE
+
+        # Assemble n-mer
+        combined = Chem.RWMol()
+        offsets = []
+        for _ in range(n):
+            offsets.append(combined.GetNumAtoms())
+            combined.InsertMol(core)
+
+        # Connect branching atoms between adjacent cores
+        branch_atom = head_ne  # == tail_ne
+        for i in range(n):
+            next_i = (i + 1) % n
+            atom_i = offsets[i] + branch_atom
+            atom_next = offsets[next_i] + branch_atom
+            combined.AddBond(atom_i, atom_next, new_bond_type)
+
+        mol_out = combined.GetMol()
+        try:
+            Chem.SanitizeMol(mol_out)
+            mol_out = Chem.AddHs(mol_out)
+        except Exception:
+            # Try partial sanitize as last resort
+            try:
+                Chem.SanitizeMol(mol_out,
+                    sanitizeOps=Chem.SanitizeFlags.SANITIZE_ALL ^
+                               Chem.SanitizeFlags.SANITIZE_PROPERTIES)
+                mol_out = Chem.AddHs(mol_out)
+            except Exception:
+                return None
 
         return mol_out
 
@@ -579,6 +664,7 @@ class RdkitLiteBackend:
             bt = f"{ba},{bb}"
             if self._set_btype(b, bt):
                 continue
+            # Try alt_ptype fallbacks
             alt1 = self.alt_ptype.get(ba)
             alt2 = self.alt_ptype.get(bb)
             found = False
@@ -594,18 +680,44 @@ class RdkitLiteBackend:
                     if self._set_btype(b, c):
                         found = True
                         break
+            # Try BOND_TYPE_FALLBACK (n7→n3, n8→n3, n9→n3, etc.)
+            if not found:
+                fb_list1 = BOND_TYPE_FALLBACK.get(ba, [])
+                fb_list2 = BOND_TYPE_FALLBACK.get(bb, [])
+                if fb_list1 or fb_list2:
+                    fb_candidates = []
+                    for fb1 in fb_list1:
+                        fb_candidates.append(f"{fb1},{bb}")
+                    for fb2 in fb_list2:
+                        fb_candidates.append(f"{ba},{fb2}")
+                    for fb1 in fb_list1:
+                        for fb2 in fb_list2:
+                            fb_candidates.append(f"{fb1},{fb2}")
+                    for c in fb_candidates:
+                        if self._set_btype(b, c):
+                            found = True
+                            break
             if not found:
                 result_flag = False
         return result_flag
 
     def _set_btype(self, bond, bt: str) -> bool:
-        if bt not in self.param.bt:
-            return False
-        entry = self.param.bt[bt]
-        bond.SetProp("ff_type", entry.tag)
-        bond.SetDoubleProp("ff_k", entry.k)
-        bond.SetDoubleProp("ff_r0", entry.r0)
-        return True
+        if bt in self.param.bt:
+            entry = self.param.bt[bt]
+            bond.SetProp("ff_type", entry.tag)
+            bond.SetDoubleProp("ff_k", entry.k)
+            bond.SetDoubleProp("ff_r0", entry.r0)
+            return True
+        # Try reverse ordering (e.g. "n3,hn" → "hn,n3")
+        parts = bt.split(",")
+        rev = f"{parts[1]},{parts[0]}"
+        if rev in self.param.bt:
+            entry = self.param.bt[rev]
+            bond.SetProp("ff_type", entry.tag)
+            bond.SetDoubleProp("ff_k", entry.k)
+            bond.SetDoubleProp("ff_r0", entry.r0)
+            return True
+        return False
 
     def _assign_atypes(self, mol) -> bool:
         result_flag = True
@@ -626,17 +738,30 @@ class RdkitLiteBackend:
                     pt2 = p2.GetProp("ff_type")
                     at = f"{pt1},{pt},{pt2}"
                     if not self._set_atype(mol, a, b, c, at):
+                        # Build candidate list: alt_ptype + BOND_TYPE_FALLBACK
+                        # For each position, try alt_ptype first, then all fallback types
+                        found = False
+                        combos = []
+                        # alt_ptype candidates
                         alt1 = self.alt_ptype.get(pt1)
                         alt2 = self.alt_ptype.get(pt)
                         alt3 = self.alt_ptype.get(pt2)
-                        found = False
-                        combos = []
                         if alt1:
                             combos.append(f"{alt1},{pt},{pt2}")
                         if alt2:
                             combos.append(f"{pt1},{alt2},{pt2}")
                         if alt3:
                             combos.append(f"{pt1},{pt},{alt3}")
+                        # BOND_TYPE_FALLBACK candidates (list-based)
+                        fb_list1 = BOND_TYPE_FALLBACK.get(pt1, [])
+                        fb_list2 = BOND_TYPE_FALLBACK.get(pt, [])
+                        fb_list3 = BOND_TYPE_FALLBACK.get(pt2, [])
+                        for fb1 in fb_list1:
+                            combos.append(f"{fb1},{pt},{pt2}")
+                        for fb2 in fb_list2:
+                            combos.append(f"{pt1},{fb2},{pt2}")
+                        for fb3 in fb_list3:
+                            combos.append(f"{pt1},{pt},{fb3}")
                         for combo in combos:
                             if self._set_atype(mol, a, b, c, combo):
                                 found = True
@@ -726,6 +851,23 @@ class RdkitLiteBackend:
                                 if alt2:
                                     combos.append(f"X,{p1t},{alt2},X")
                                 for combo in combos:
+                                    if self._set_dtype(mol, a, b, c, d, combo):
+                                        found = True
+                                        break
+                        # Try BOND_TYPE_FALLBACK for dihedral center atoms
+                        if not found:
+                            fb_list1 = BOND_TYPE_FALLBACK.get(p1t, [])
+                            fb_list2 = BOND_TYPE_FALLBACK.get(p2t, [])
+                            if fb_list1 or fb_list2:
+                                fb_combos = []
+                                for fb1 in fb_list1:
+                                    fb_combos.append(f"X,{fb1},{p2t},X")
+                                for fb2 in fb_list2:
+                                    fb_combos.append(f"X,{p1t},{fb2},X")
+                                for fb1 in fb_list1:
+                                    for fb2 in fb_list2:
+                                        fb_combos.append(f"X,{fb1},{fb2},X")
+                                for combo in fb_combos:
                                     if self._set_dtype(mol, a, b, c, d, combo):
                                         found = True
                                         break

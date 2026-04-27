@@ -219,10 +219,11 @@ class TestPSMILESCyclicPolymer:
         assert mol is not None
         assert all(a.GetSymbol() != "*" for a in mol.GetAtoms())
 
-    def test_degenerate_single_atom_core_returns_none(self):
-        """Degenerate *=C=* (single-atom core) returns None."""
+    def test_degenerate_single_atom_core_handled(self):
+        """Degenerate *=C=* (single-atom core) is now handled by _make_cyclic_polymer_degenerate."""
         mol = self._make_polymer("*=C=*", n=3)
-        assert mol is None
+        # With the degenerate core handler, this now succeeds
+        assert mol is not None
 
     def test_non_psmiles_passthrough(self):
         """Non-pSMILES (no wildcards) is not affected by cyclic parameter."""
