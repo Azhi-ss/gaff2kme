@@ -71,6 +71,10 @@ BOND_TYPE_FALLBACK: dict[str, list[str]] = {
     "ha": ["hc"],         # sp2 C-H → sp3 C-H (for ci,ha → ci,hc fallback)
     "h1": ["hc"],         # sp3 C-H (1 electroneg) → hc (for ci,h1 fallback)
     "hi": ["hc"],         # Si-H → sp3 C-H (ci,hc is the only ci-H bond entry)
+    # Si atom type → ci/c3 (Si-like carbon types for bond resolution)
+    "si": ["ci", "c3"],   # Si → ci first (si,ci exists), c3 2nd (c1,c3 covers sp carbon)
+    # Oxygen types → Si-compatible oxygen (for os,si bond fallback)
+    "os": ["oss", "oi"],  # ether O → Si-O-Si bridge first, Si-OH second
 }
 
 
@@ -613,12 +617,11 @@ class RdkitLiteBackend:
         if p.GetTotalNumHs(includeNeighbors=True) == 2:
             self._set_ptype(p, "ow")
             return True
-        if p.GetTotalNumHs(includeNeighbors=True) == 1:
-            si_flag = sum(1 for nb in p.GetNeighbors() if nb.GetSymbol() == "Si")
-            self._set_ptype(p, "oi" if si_flag == 1 else "oh")
-            return True
         si_flag = sum(1 for nb in p.GetNeighbors() if nb.GetSymbol() == "Si")
-        self._set_ptype(p, "oss" if si_flag == 2 else "os")
+        if p.GetTotalNumHs(includeNeighbors=True) == 1:
+            self._set_ptype(p, "oi" if si_flag >= 1 else "oh")
+            return True
+        self._set_ptype(p, "oss" if si_flag >= 2 else "os")
         return True
 
     def _type_phosphorus(self, p) -> bool:
