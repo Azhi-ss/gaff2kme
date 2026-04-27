@@ -76,3 +76,12 @@ def test_compute_no_nan_for_degenerate():
     smi = "[*]C([*])C(=O)OC"
     result = compute(smi, cyclic=10)
     assert not np.any(np.isnan(result)), "compute() should not return NaN for degenerate SMILES"
+
+
+# ---- Test 7: Over-valenced degenerate pSMILES returns None ----
+def test_over_valenced_degenerate_returns_none(be):
+    """[*]=C([*])F has double-bond wildcards on a C that also bonds to F.
+    After polymerization, each C would have valence 5 (2 double + 1 single).
+    This is chemically invalid — should return None, not a broken molecule."""
+    mol = be.smiles_to_mol("[*]=C([*])F", cyclic=3)
+    assert mol is None, "Over-valenced degenerate pSMILES should return None"

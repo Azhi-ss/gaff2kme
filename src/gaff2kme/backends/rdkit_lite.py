@@ -42,29 +42,29 @@ ALT_PTYPE_GAFF2_MOD: dict[str, str] = {
 # Fallback for atom types that exist in particle_types but have no
 # bond_type / angle_type / dihedral_type entries.
 # Each entry maps to a list of fallback types tried in order.
-# The order matters: more chemically similar first, then broader fallbacks.
+# Based on RadonPy's alt_ptype mappings (gaff2.py, gaff2_mod.py).
 BOND_TYPE_FALLBACK: dict[str, list[str]] = {
-    # Nitrogen types without bond entries
-    "n7": ["n", "n3"],   # n (sp2 N) first for aromatic/SP2 contexts, then n3 (sp3)
-    "n8": ["n", "n3"],
-    "n9": ["n", "n3"],
-    "n3": ["n"],          # n3 has no entries for SP2 carbons (c, ca, cc); fall back to n
-    "ng": ["n", "n3"],    # guanidinium N
-    "ns": ["n", "na"],    # sulfonamide N
-    "nt": ["n", "n3"],    # amide N
-    "nu": ["n", "n3"],
-    "nv": ["n", "n3"],
-    "nx": ["n", "n3"],
-    "ny": ["n", "n3"],
-    "nz": ["n", "n3"],
+    # sp3 nitrogen types → n3 (sp3 N, matching hybridization), then n (sp2, for c/ca/cc coverage)
+    "n7": ["n3", "n"],    # sp3 NH → n3 first (RadonPy: n7→n3)
+    "n8": ["n3", "n"],    # sp3 NH2 → n3 first (RadonPy: n8→n3)
+    "n9": ["n3", "n"],    # sp3 NH3 → n3 first (RadonPy: n9→n3)
+    "n3": ["n"],          # sp3 N → n as gap-filler for sp2 carbon neighbors
+    "ng": ["n3", "n"],    # guanidinium N → n3 first (RadonPy gaff2_mod: ng→n3)
+    "ns": ["n", "na"],    # sulfonamide N → n first (RadonPy: ns→n)
+    "nt": ["n", "nh"],    # amide N → n first, nh as sp2 2nd (RadonPy: nt→n)
+    # Aromatic-ring adjacent N → nh (aromatic N, correct analog)
+    "nu": ["nh", "n"],    # aromatic-ring NH → nh first (RadonPy: nu→nh)
+    "nv": ["nh", "n"],    # aromatic-ring NH2 → nh first (RadonPy: nv→nh)
+    # Degree-4 (tetrahedral) N → n4 (degree-4 N)
+    "nx": ["n4"],         # degree-4 NH → n4 (RadonPy: nx→n4)
+    "ny": ["n4"],         # degree-4 NH2 → n4 (RadonPy: ny→n4)
+    "nz": ["n4"],         # degree-4 NH3 → n4 (RadonPy: nz→n4)
+    "n+": ["n4"],         # NH4+ → n4 (RadonPy: n+→n4)
     # Carbon types without bond entries
-    "c3f": ["c3"],        # CF carbon → sp3 carbon
-    "cg": ["c", "cc"],    # inner conjugated SP carbon
-    "cs": ["c", "c3"],    # another carbon variant
-    # Halogen / H types without bond entries
-    "hn": ["h1", "hc"],   # H on N → generic H
-    "hi": ["h1", "hc"],   # H on I → generic H
-    "br": ["cl"],         # Br → Cl (halogen fallback)
+    "c3f": ["c3"],        # CF carbon → sp3 carbon (RadonPy gaff2_mod: c3f→c3)
+    "cs": ["c", "c2"],    # C=S carbon → c(sp2) first, c2(sp2) 2nd (RadonPy: cs→c)
+    # Phosphorus types without angle entries
+    "pb": ["pc"],         # aromatic P → pc (RadonPy: pb→pc)
 }
 
 
@@ -364,14 +364,7 @@ class RdkitLiteBackend:
             Chem.SanitizeMol(mol_out)
             mol_out = Chem.AddHs(mol_out)
         except Exception:
-            # Try partial sanitize as last resort
-            try:
-                Chem.SanitizeMol(mol_out,
-                    sanitizeOps=Chem.SanitizeFlags.SANITIZE_ALL ^
-                               Chem.SanitizeFlags.SANITIZE_PROPERTIES)
-                mol_out = Chem.AddHs(mol_out)
-            except Exception:
-                return None
+            return None
 
         return mol_out
 
